@@ -41,7 +41,15 @@ impl AtomicSwap {
     pub fn initiate_swap(env: Env, ip_id: u64, price: i128, buyer: Address) -> u64 {
         assert!(price > 0, "price must be greater than zero");
         let seller = env.current_contract_address(); // placeholder; real impl uses invoker
-        let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+
+        const TTL_THRESHOLD: u32 = 518400;
+        const TTL_BUMP: u32 = 518400;
+
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextId)
+            .unwrap_or(0);
 
         let swap = SwapRecord {
             ip_id,
@@ -52,7 +60,10 @@ impl AtomicSwap {
         };
 
         env.storage().persistent().set(&DataKey::Swap(id), &swap);
-        env.storage().instance().set(&DataKey::NextId, &(id + 1));
+        env.storage().persistent().set(&DataKey::NextId, &(id + 1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::NextId, TTL_THRESHOLD, TTL_BUMP);
         id
     }
 
@@ -123,6 +134,31 @@ mod tests {
     }
 
     #[test]
+    fn test_next_id_counter_persists_across_calls() {
+        let (env, client) = setup();
+        let buyer = Address::generate(&env);
+        env.mock_all_auths();
+
+        let id0 = client.initiate_swap(&1u64, &100i128, &buyer);
+        let id1 = client.initiate_swap(&2u64, &200i128, &buyer);
+        let id2 = client.initiate_swap(&3u64, &300i128, &buyer);
+
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        // counter is in persistent storage — verify directly
+        env.as_contract(&client.address, || {
+            let next: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::NextId)
+                .expect("NextId missing from persistent storage");
+            assert_eq!(next, 3);
+        });
+    }
+
+    #[test]
     fn test_initiate_swap_zero_price_rejected() {
         let (env, client) = setup();
         let buyer = Address::generate(&env);
@@ -140,7 +176,7 @@ mod tests {
 
         // initiate a swap
         let swap_id = env.as_contract(&client.address, || {
-            let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+            let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
             let swap = SwapRecord {
                 ip_id: 1,
                 seller: seller.clone(),
@@ -149,7 +185,7 @@ mod tests {
                 status: SwapStatus::Pending,
             };
             env.storage().persistent().set(&DataKey::Swap(id), &swap);
-            env.storage().instance().set(&DataKey::NextId, &(id + 1));
+            env.storage().persistent().set(&DataKey::NextId, &(id + 1));
             id
         });
 
@@ -175,7 +211,7 @@ mod tests {
 
         // seed an Accepted swap directly
         let swap_id = env.as_contract(&client.address, || {
-            let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+            let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
             let swap = SwapRecord {
                 ip_id: 1,
                 seller: seller.clone(),
@@ -184,7 +220,7 @@ mod tests {
                 status: SwapStatus::Accepted,
             };
             env.storage().persistent().set(&DataKey::Swap(id), &swap);
-            env.storage().instance().set(&DataKey::NextId, &(id + 1));
+            env.storage().persistent().set(&DataKey::NextId, &(id + 1));
             id
         });
 
