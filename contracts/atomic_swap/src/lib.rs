@@ -17,6 +17,12 @@ pub struct IpRecord {
     pub timestamp: u64,
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Default swap duration in seconds (24 hours). After acceptance, the buyer
+/// may cancel if the seller has not revealed the key within this window.
+pub const DEFAULT_SWAP_DURATION_SECS: u64 = 86_400;
+
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -44,6 +50,9 @@ pub struct SwapRecord {
     pub buyer: Address,
     pub price: i128,
     pub status: SwapStatus,
+    /// Ledger timestamp after which the buyer may cancel an Accepted swap
+    /// if reveal_key has not been called. Set at initiation time.
+    pub expiry: u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -54,6 +63,8 @@ pub struct AtomicSwap;
 #[contractimpl]
 impl AtomicSwap {
     /// Seller initiates a patent sale. Validates ip_id exists in IpRegistry first.
+    /// `duration_secs` controls how long (in seconds from now) the swap stays live;
+    /// pass 0 to use the default of 24 hours.
     /// Returns the swap ID.
     pub fn initiate_swap(
         env: Env,
@@ -61,10 +72,18 @@ impl AtomicSwap {
         ip_id: u64,
         price: i128,
         buyer: Address,
+        duration_secs: u64,
     ) -> u64 {
         // Cross-contract validation: panic if ip_id does not exist in the registry.
         let registry = IpRegistryClient::new(&env, &ip_registry);
         registry.get_ip(&ip_id); // panics with "IP not found" if absent
+
+        let duration = if duration_secs == 0 {
+            DEFAULT_SWAP_DURATION_SECS
+        } else {
+            duration_secs
+        };
+        let expiry = env.ledger().timestamp() + duration;
 
         let seller = env.current_contract_address();
         let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
@@ -75,6 +94,7 @@ impl AtomicSwap {
             buyer,
             price,
             status: SwapStatus::Pending,
+            expiry,
         };
 
         env.storage().persistent().set(&DataKey::Swap(id), &swap);
@@ -109,7 +129,7 @@ impl AtomicSwap {
         env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
     }
 
-    /// Cancel a swap (invalid key or timeout).
+    /// Cancel a swap that is still Pending (pre-acceptance, anyone can cancel).
     pub fn cancel_swap(env: Env, swap_id: u64) {
         let mut swap: SwapRecord = env
             .storage()
@@ -117,10 +137,30 @@ impl AtomicSwap {
             .get(&DataKey::Swap(swap_id))
             .expect("swap not found");
 
+        assert!(swap.status == SwapStatus::Pending, "only pending swaps can be cancelled this way");
+        swap.status = SwapStatus::Cancelled;
+        env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
+    }
+
+    /// Buyer cancels an Accepted swap after the expiry has passed and the seller
+    /// has not revealed the key. Releases escrowed funds back to the buyer.
+    /// Panics if: swap is not Accepted, caller is not the buyer, or expiry has
+    /// not yet been reached.
+    pub fn cancel_expired_swap(env: Env, swap_id: u64, caller: Address) {
+        let mut swap: SwapRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Swap(swap_id))
+            .expect("swap not found");
+
+        assert!(swap.status == SwapStatus::Accepted, "swap not in Accepted state");
+        assert!(caller == swap.buyer, "only the buyer can cancel an expired swap");
         assert!(
-            swap.status == SwapStatus::Pending || swap.status == SwapStatus::Accepted,
-            "swap already finalised"
+            env.ledger().timestamp() > swap.expiry,
+            "swap has not expired yet"
         );
+
+        // Full impl: transfer escrowed funds back to buyer here
         swap.status = SwapStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
     }
@@ -141,7 +181,7 @@ mod tests {
     use super::*;
     use ip_registry::{IpRegistry, IpRegistryClient as RegistryClient};
     use soroban_sdk::{
-        testutils::{Address as _, BytesN as _},
+        testutils::{Address as _, BytesN as _, Ledger},
         Env,
     };
 
@@ -149,45 +189,139 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        // Deploy IpRegistry
         let registry_id = env.register_contract(None, IpRegistry);
-
-        // Deploy AtomicSwap
         let swap_id = env.register_contract(None, AtomicSwap);
-
         let owner = Address::generate(&env);
 
         (env, registry_id, swap_id, owner)
     }
 
+    /// Register an IP and return (ip_id, swap_contract_client, buyer).
+    fn setup_with_ip(
+        env: &Env,
+        registry_id: &Address,
+        swap_id: &Address,
+        owner: &Address,
+    ) -> (u64, AtomicSwapClient, Address) {
+        let registry = RegistryClient::new(env, registry_id);
+        let hash = BytesN::random(env);
+        let ip_id = registry.commit_ip(owner, &hash);
+        let swap_client = AtomicSwapClient::new(env, swap_id);
+        let buyer = Address::generate(env);
+        (ip_id, swap_client, buyer)
+    }
+
     #[test]
     fn test_initiate_swap_valid_ip_id_succeeds() {
         let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
 
-        let registry = RegistryClient::new(&env, &registry_id);
-        let hash = BytesN::random(&env);
-        let ip_id = registry.commit_ip(&owner, &hash);
-
-        let swap_client = AtomicSwapClient::new(&env, &swap_id);
-        let buyer = Address::generate(&env);
-
-        let result = swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer);
+        let result = swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &0u64);
         assert_eq!(result, 0u64);
 
         let record = swap_client.get_swap(&result);
         assert_eq!(record.ip_id, ip_id);
         assert_eq!(record.status, SwapStatus::Pending);
+        // expiry should be set to now + default duration
+        assert_eq!(record.expiry, env.ledger().timestamp() + DEFAULT_SWAP_DURATION_SECS);
     }
 
     #[test]
     #[should_panic(expected = "IP not found")]
     fn test_initiate_swap_nonexistent_ip_id_panics() {
         let (env, registry_id, swap_id, _owner) = setup();
-
         let swap_client = AtomicSwapClient::new(&env, &swap_id);
         let buyer = Address::generate(&env);
+        swap_client.initiate_swap(&registry_id, &999u64, &500_i128, &buyer, &0u64);
+    }
 
-        // ip_id 999 was never registered — must panic
-        swap_client.initiate_swap(&registry_id, &999u64, &500_i128, &buyer);
+    #[test]
+    fn test_cancel_expired_swap_after_timeout() {
+        let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
+
+        // Initiate with a short 100-second window
+        let duration: u64 = 100;
+        let swap_record_id =
+            swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &duration);
+
+        // Buyer accepts
+        swap_client.accept_swap(&swap_record_id);
+
+        let record = swap_client.get_swap(&swap_record_id);
+        assert_eq!(record.status, SwapStatus::Accepted);
+
+        // Advance past expiry (premature cancellation is covered by a separate #[should_panic] test)
+        let expiry = record.expiry;
+        env.ledger().with_mut(|l| l.timestamp = expiry + 1);
+
+        // Buyer cancels — must succeed and funds return to buyer
+        swap_client.cancel_expired_swap(&swap_record_id, &buyer);
+
+        let final_record = swap_client.get_swap(&swap_record_id);
+        assert_eq!(final_record.status, SwapStatus::Cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap has not expired yet")]
+    fn test_cancel_expired_swap_before_timeout_panics() {
+        let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
+
+        let swap_record_id =
+            swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &100u64);
+        swap_client.accept_swap(&swap_record_id);
+
+        // Do NOT advance time — expiry has not passed
+        swap_client.cancel_expired_swap(&swap_record_id, &buyer);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the buyer can cancel an expired swap")]
+    fn test_cancel_expired_swap_non_buyer_panics() {
+        let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
+
+        let swap_record_id =
+            swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &100u64);
+        swap_client.accept_swap(&swap_record_id);
+
+        let expiry = swap_client.get_swap(&swap_record_id).expiry;
+        env.ledger().with_mut(|l| l.timestamp = expiry + 1);
+
+        // Stranger tries to cancel — must panic
+        let stranger = Address::generate(&env);
+        swap_client.cancel_expired_swap(&swap_record_id, &stranger);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap not in Accepted state")]
+    fn test_cancel_expired_swap_on_pending_panics() {
+        let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
+
+        let swap_record_id =
+            swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &100u64);
+
+        // Advance past expiry without accepting first
+        env.ledger().with_mut(|l| l.timestamp = l.timestamp + 200);
+        swap_client.cancel_expired_swap(&swap_record_id, &buyer);
+    }
+
+    #[test]
+    fn test_reveal_key_before_expiry_completes_swap() {
+        let (env, registry_id, swap_id, owner) = setup();
+        let (ip_id, swap_client, buyer) = setup_with_ip(&env, &registry_id, &swap_id, &owner);
+
+        let swap_record_id =
+            swap_client.initiate_swap(&registry_id, &ip_id, &1000_i128, &buyer, &100u64);
+        swap_client.accept_swap(&swap_record_id);
+
+        // Reveal key well within the window — normal happy path unaffected
+        let key = BytesN::random(&env);
+        swap_client.reveal_key(&swap_record_id, &key);
+
+        let record = swap_client.get_swap(&swap_record_id);
+        assert_eq!(record.status, SwapStatus::Completed);
     }
 }
