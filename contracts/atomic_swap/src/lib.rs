@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env};
 
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
@@ -52,6 +52,12 @@ impl AtomicSwap {
 
         env.storage().persistent().set(&DataKey::Swap(id), &swap);
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
+
+        env.events().publish(
+            (symbol_short!("sw_init"), swap.seller.clone()),
+            (id, swap.ip_id, swap.seller, swap.buyer, swap.price),
+        );
+
         id
     }
 
@@ -104,5 +110,33 @@ impl AtomicSwap {
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .expect("swap not found")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    #[test]
+    fn initiate_swap_emits_event() {
+        let env = Env::default();
+        let contract_id = env.register(AtomicSwap, ());
+        let client = AtomicSwapClient::new(&env, &contract_id);
+
+        let buyer = Address::generate(&env);
+        let swap_id = client.initiate_swap(&1u64, &500i128, &buyer);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, _topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+            events.get(0).unwrap();
+        let (emitted_swap_id, emitted_ip_id, _seller, emitted_buyer, emitted_price):
+            (u64, u64, Address, Address, i128) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_swap_id, swap_id);
+        assert_eq!(emitted_ip_id, 1u64);
+        assert_eq!(emitted_buyer, buyer);
+        assert_eq!(emitted_price, 500i128);
     }
 }
