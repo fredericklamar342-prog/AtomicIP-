@@ -4,6 +4,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Ve
 // ── Storage Keys ────────────────────────────────────────────────────────────
 
 #[contracttype]
+#[derive(Debug, PartialEq)]
 pub enum DataKey {
     IpRecord(u64),
     OwnerIps(Address),
@@ -40,6 +41,7 @@ impl IpRegistry {
         };
 
         env.storage().persistent().set(&DataKey::IpRecord(id), &record);
+        env.storage().persistent().extend_ttl(&DataKey::IpRecord(id), 50000, 50000);
 
         // Append to owner index
         let mut ids: Vec<u64> = env
@@ -48,7 +50,8 @@ impl IpRegistry {
             .get(&DataKey::OwnerIps(owner.clone()))
             .unwrap_or(Vec::new(&env));
         ids.push_back(id);
-        env.storage().persistent().set(&DataKey::OwnerIps(owner), &ids);
+        env.storage().persistent().set(&DataKey::OwnerIps(owner.clone()), &ids);
+        env.storage().persistent().extend_ttl(&DataKey::OwnerIps(owner), 50000, 50000);
 
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
         id
@@ -80,3 +83,6 @@ impl IpRegistry {
             .unwrap_or(Vec::new(&env))
     }
 }
+
+#[cfg(test)]
+mod basic_tests;

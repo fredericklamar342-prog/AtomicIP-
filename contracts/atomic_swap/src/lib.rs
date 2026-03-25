@@ -4,6 +4,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
+#[derive(Debug, PartialEq)]
 pub enum DataKey {
     Swap(u64),
     NextId,
@@ -12,7 +13,7 @@ pub enum DataKey {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum SwapStatus {
     Pending,
     Accepted,
@@ -51,6 +52,7 @@ impl AtomicSwap {
         };
 
         env.storage().persistent().set(&DataKey::Swap(id), &swap);
+        env.storage().persistent().extend_ttl(&DataKey::Swap(id), 50000, 50000);
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
         id
     }
@@ -66,6 +68,7 @@ impl AtomicSwap {
         assert!(swap.status == SwapStatus::Pending, "swap not pending");
         swap.status = SwapStatus::Accepted;
         env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
+        env.storage().persistent().extend_ttl(&DataKey::Swap(swap_id), 50000, 50000);
     }
 
     /// Seller reveals the decryption key; payment releases.
@@ -80,6 +83,7 @@ impl AtomicSwap {
         // Full impl: verify key against IP commitment, then transfer escrowed payment
         swap.status = SwapStatus::Completed;
         env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
+        env.storage().persistent().extend_ttl(&DataKey::Swap(swap_id), 50000, 50000);
     }
 
     /// Cancel a swap (invalid key or timeout).
@@ -96,6 +100,7 @@ impl AtomicSwap {
         );
         swap.status = SwapStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Swap(swap_id), &swap);
+        env.storage().persistent().extend_ttl(&DataKey::Swap(swap_id), 50000, 50000);
     }
 
     /// Read a swap record.
@@ -106,3 +111,6 @@ impl AtomicSwap {
             .expect("swap not found")
     }
 }
+
+#[cfg(test)]
+mod basic_tests;
