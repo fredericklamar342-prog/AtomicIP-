@@ -39,6 +39,7 @@ pub struct AtomicSwap;
 impl AtomicSwap {
     /// Seller initiates a patent sale. Returns the swap ID.
     pub fn initiate_swap(env: Env, ip_id: u64, price: i128, buyer: Address) -> u64 {
+        assert!(price > 0, "price must be greater than zero");
         let seller = env.current_contract_address(); // placeholder; real impl uses invoker
         let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
 
@@ -119,6 +120,15 @@ mod tests {
         let contract_id = env.register(AtomicSwap, ());
         let client = AtomicSwapClient::new(&env, &contract_id);
         (env, client)
+    }
+
+    #[test]
+    fn test_initiate_swap_zero_price_rejected() {
+        let (env, client) = setup();
+        let buyer = Address::generate(&env);
+        env.mock_all_auths();
+        let result = client.try_initiate_swap(&1u64, &0i128, &buyer);
+        assert!(result.is_err(), "expected failure for zero price");
     }
 
     #[test]
