@@ -4,6 +4,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Ve
 #[cfg(test)]
 mod test;
 
+mod test;
+
 // ── Storage Keys ────────────────────────────────────────────────────────────
 
 #[contracttype]
