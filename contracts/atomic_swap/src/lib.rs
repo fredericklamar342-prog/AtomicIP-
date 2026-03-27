@@ -1,8 +1,15 @@
 #![no_std]
 use ip_registry::IpRegistryClient;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Error};
 
-// ── Storage Keys ─────────────────────────────────────────────────────────────
+// ── Error Codes ────────────────────────────────────────────────────────────
+
+#[repr(u32)]
+pub enum ContractError {
+    SwapNotFound = 1,
+}
+
+// ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Debug, PartialEq)]
@@ -110,7 +117,9 @@ impl AtomicSwap {
             .storage()
             .persistent()
             .get(&DataKey::Swap(swap_id))
-            .expect("swap not found");
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+            });
 
         swap.buyer.require_auth();
         assert!(swap.status == SwapStatus::Pending, "swap not pending");
@@ -131,7 +140,9 @@ impl AtomicSwap {
             .storage()
             .persistent()
             .get(&DataKey::Swap(swap_id))
-            .expect("swap not found");
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+            });
 
         assert!(caller == swap.seller, "only the seller can reveal the key");
         caller.require_auth();
@@ -152,7 +163,9 @@ impl AtomicSwap {
             .storage()
             .persistent()
             .get(&DataKey::Swap(swap_id))
-            .expect("swap not found");
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+            });
 
         assert!(
             canceller == swap.seller || canceller == swap.buyer,
@@ -179,7 +192,9 @@ impl AtomicSwap {
             .storage()
             .persistent()
             .get(&DataKey::Swap(swap_id))
-            .expect("swap not found");
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+            });
 
         assert!(
             swap.status == SwapStatus::Accepted,
