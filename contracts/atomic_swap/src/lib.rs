@@ -140,13 +140,19 @@ impl AtomicSwap {
         env.storage().persistent().extend_ttl(&DataKey::Swap(swap_id), 50000, 50000);
     }
 
-    /// Cancel a pending swap.
-    pub fn cancel_swap(env: Env, swap_id: u64, _canceller: Address) {
+    /// Cancel a pending swap. Only the seller or buyer may cancel.
+    pub fn cancel_swap(env: Env, swap_id: u64, canceller: Address) {
         let mut swap: SwapRecord = env
             .storage()
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .expect("swap not found");
+
+        assert!(
+            canceller == swap.seller || canceller == swap.buyer,
+            "only the seller or buyer can cancel"
+        );
+        canceller.require_auth();
 
         assert!(swap.status == SwapStatus::Pending, "only pending swaps can be cancelled this way");
         swap.status = SwapStatus::Cancelled;

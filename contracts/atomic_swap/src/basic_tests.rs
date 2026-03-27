@@ -41,6 +41,29 @@ mod tests {
         assert_ne!(SwapStatus::Cancelled, SwapStatus::Pending);
     }
 
+    /// SECURITY: only the seller or buyer may cancel a swap.
+    /// Any other address must be rejected even with `mock_all_auths`, because
+    /// the identity check is an explicit assert that runs before `require_auth`.
+    #[test]
+    #[should_panic(expected = "only the seller or buyer can cancel")]
+    fn test_unauthorized_cancel_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = soroban_sdk::Address::generate(&env);
+        let buyer = soroban_sdk::Address::generate(&env);
+        let attacker = soroban_sdk::Address::generate(&env);
+
+        let (registry_id, ip_id) = setup_registry(&env, &seller);
+        let contract_id = env.register(AtomicSwap, ());
+        let client = AtomicSwapClient::new(&env, &contract_id);
+
+        let swap_id = client.initiate_swap(&registry_id, &ip_id, &seller, &500_i128, &buyer);
+
+        // attacker is neither seller nor buyer — must panic
+        client.cancel_swap(&swap_id, &attacker);
+    }
+
     /// SECURITY: only the seller may reveal the key.
     /// Passing a different address as `caller` must be rejected even with
     /// `mock_all_auths`, because the identity check is an explicit assert
