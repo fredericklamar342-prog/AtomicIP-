@@ -128,7 +128,9 @@ impl AtomicSwap {
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .unwrap_or_else(|| {
-                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::SwapNotFound as u32,
+                ))
             });
 
         swap.buyer.require_auth();
@@ -155,7 +157,9 @@ impl AtomicSwap {
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .unwrap_or_else(|| {
-                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::SwapNotFound as u32,
+                ))
             });
 
         assert!(caller == swap.seller, "only the seller can reveal the key");
@@ -182,7 +186,9 @@ impl AtomicSwap {
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .unwrap_or_else(|| {
-                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::SwapNotFound as u32,
+                ))
             });
 
         assert!(
@@ -215,7 +221,9 @@ impl AtomicSwap {
             .persistent()
             .get(&DataKey::Swap(swap_id))
             .unwrap_or_else(|| {
-                env.panic_with_error(Error::from_contract_error(ContractError::SwapNotFound as u32))
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::SwapNotFound as u32,
+                ))
             });
 
         assert!(
@@ -260,7 +268,7 @@ mod tests {
     fn setup_registry_with_ip(env: &Env, owner: &Address) -> (Address, u64) {
         let registry_id = env.register(IpRegistry, ());
         let registry = IpRegistryClient::new(env, &registry_id);
-        let commitment = BytesN::from_array(env, &[0u8; 32]);
+        let commitment = BytesN::from_array(env, &[1u8; 32]);
         let ip_id = registry.commit_ip(owner, &commitment);
         (registry_id, ip_id)
     }
@@ -403,7 +411,7 @@ mod tests {
         // Set up registry and IP with seller auth mocked for setup calls.
         let registry_id = env.register(IpRegistry, ());
         let registry = IpRegistryClient::new(&env, &registry_id);
-        let commitment = BytesN::from_array(&env, &[0u8; 32]);
+        let commitment = BytesN::from_array(&env, &[1u8; 32]);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &seller,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
