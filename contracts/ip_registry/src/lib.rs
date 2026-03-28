@@ -13,6 +13,7 @@ pub enum ContractError {
     IpNotFound = 1,
     ZeroCommitmentHash = 2,
     CommitmentAlreadyRegistered = 3,
+    IpAlreadyRevoked = 4,
 }
 
 // ── Storage Keys ────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ pub struct IpRecord {
     pub owner: Address,
     pub commitment_hash: BytesN<32>,
     pub timestamp: u64,
+    pub revoked: bool,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -116,6 +118,7 @@ impl IpRegistry {
             owner: owner.clone(),
             commitment_hash: commitment_hash.clone(),
             timestamp: env.ledger().timestamp(),
+            revoked: false,
         };
 
         env.storage()
@@ -214,6 +217,36 @@ impl IpRegistry {
         );
 
         record.owner = new_owner;
+        env.storage()
+            .persistent()
+            .set(&DataKey::IpRecord(ip_id), &record);
+    }
+
+    /// Revoke an IP record, marking it as invalid.
+    ///
+    /// Only the current owner may revoke. A revoked IP cannot be swapped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the IP does not exist, the owner does not authorize, or the IP is already revoked.
+    pub fn revoke_ip(env: Env, ip_id: u64) {
+        let mut record: IpRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IpRecord(ip_id))
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(ContractError::IpNotFound as u32))
+            });
+
+        record.owner.require_auth();
+
+        if record.revoked {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::IpAlreadyRevoked as u32,
+            ));
+        }
+
+        record.revoked = true;
         env.storage()
             .persistent()
             .set(&DataKey::IpRecord(ip_id), &record);

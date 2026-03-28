@@ -19,6 +19,7 @@ pub enum ContractError {
     SwapNotInAcceptedState = 11,
     OnlyTheBuyerCanCancelAnExpiredSwap = 12,
     SwapHasNotExpiredYet = 13,
+    IpIsRevoked = 14,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -139,6 +140,11 @@ impl AtomicSwap {
         if record.owner != seller {
             env.panic_with_error(Error::from_contract_error(
                 ContractError::SellerIsNotTheIPOwner as u32,
+            ));
+        }
+        if record.revoked {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::IpIsRevoked as u32,
             ));
         }
 
@@ -676,10 +682,34 @@ mod tests {
         );
     }
 
+    /// SECURITY: a revoked IP must not be swappable.
+    #[test]
+    fn revoked_ip_cannot_be_swapped() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (registry_id, ip_id) = setup_registry_with_ip(&env, &seller);
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
+
+        // Revoke the IP via the registry
+        let registry = IpRegistryClient::new(&env, &registry_id);
+        registry.revoke_ip(&ip_id);
+
+        let client = AtomicSwapClient::new(&env, &setup_swap(&env));
+        assert!(
+            client
+                .try_initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer)
+                .is_err(),
+            "expected initiate_swap to fail for revoked IP"
+        );
+    }
+
     /// SECURITY: a zero price must be rejected to prevent free IP giveaways.
     #[test]
-    fn zero_price_rejected() {
-        let env = Env::default();
+    fn zero_price_rejected() {        let env = Env::default();
         env.mock_all_auths();
 
         let seller = Address::generate(&env);
