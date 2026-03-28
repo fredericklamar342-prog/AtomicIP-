@@ -12,6 +12,7 @@ mod tests {
         fn get_ip(env: Env, ip_id: u64) -> IpRecord;
         fn list_ip_by_owner(env: Env, owner: Address) -> Option<Vec<u64>>;
         fn transfer_ip(env: Env, ip_id: u64, new_owner: Address);
+        fn revoke_ip(env: Env, ip_id: u64);
     }
 
     #[test]
@@ -212,5 +213,61 @@ mod tests {
             .expect("owner should have committed IPs");
         assert_eq!(owner_ips.len(), 1);
         assert_eq!(owner_ips.get(0).unwrap(), ip_id);
+    }
+
+    #[test]
+    fn test_revoke_ip_marks_record_revoked() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+        env.mock_all_auths();
+        let ip_id = client.commit_ip(&owner, &commitment);
+
+        assert!(!client.get_ip(&ip_id).revoked);
+        client.revoke_ip(&ip_id);
+        assert!(client.get_ip(&ip_id).revoked);
+    }
+
+    #[test]
+    #[should_panic(expected = "ContractError(4)")]
+    fn test_revoke_ip_twice_panics() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        env.mock_all_auths();
+        let ip_id = client.commit_ip(&owner, &BytesN::from_array(&env, &[8u8; 32]));
+        client.revoke_ip(&ip_id);
+        client.revoke_ip(&ip_id); // must panic with IpAlreadyRevoked (code 4)
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_revoke_ip_requires_owner_auth() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        let attacker = <Address as TestAddress>::generate(&env);
+        env.mock_all_auths();
+        let ip_id = client.commit_ip(&owner, &BytesN::from_array(&env, &[9u8; 32]));
+
+        // Only mock attacker's auth — owner's auth is absent, must panic
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke_ip",
+                args: (ip_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.revoke_ip(&ip_id);
     }
 }
