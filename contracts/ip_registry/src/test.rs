@@ -3,7 +3,7 @@ mod tests {
     use crate::IpRecord;
     use soroban_sdk::contractclient;
     use soroban_sdk::testutils::Address as TestAddress;
-    use soroban_sdk::{symbol_short, Address, BytesN, Env, TryFromVal, Vec};
+    use soroban_sdk::{symbol_short, Address, BytesN, Env, IntoVal, TryFromVal, Vec};
 
     #[contractclient(name = "IpRegistryClient")]
     #[allow(dead_code)]
@@ -11,6 +11,7 @@ mod tests {
         fn commit_ip(env: Env, owner: Address, commitment_hash: BytesN<32>) -> u64;
         fn get_ip(env: Env, ip_id: u64) -> IpRecord;
         fn list_ip_by_owner(env: Env, owner: Address) -> Option<Vec<u64>>;
+        fn transfer_ip(env: Env, ip_id: u64, new_owner: Address);
     }
 
     #[test]
@@ -119,6 +120,73 @@ mod tests {
 
         // ID 999 was never committed — must panic with ContractError::IpNotFound (code 1)
         client.get_ip(&999u64);
+    }
+
+    #[test]
+    fn test_transfer_ip_updates_owner_and_indexes() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let alice = <Address as TestAddress>::generate(&env);
+        let bob = <Address as TestAddress>::generate(&env);
+        let commitment = BytesN::from_array(&env, &[5u8; 32]);
+
+        env.mock_all_auths();
+        let ip_id = client.commit_ip(&alice, &commitment);
+
+        client.transfer_ip(&ip_id, &bob);
+
+        // Record owner updated
+        let record = client.get_ip(&ip_id);
+        assert_eq!(record.owner, bob);
+
+        // Old owner index no longer contains ip_id
+        let alice_ips = client.list_ip_by_owner(&alice).unwrap_or(Vec::new(&env));
+        assert!(!alice_ips.iter().any(|x| x == ip_id));
+
+        // New owner index contains ip_id
+        let bob_ips = client.list_ip_by_owner(&bob).expect("bob should have IPs");
+        assert!(bob_ips.iter().any(|x| x == ip_id));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_transfer_ip_requires_owner_auth() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let alice = <Address as TestAddress>::generate(&env);
+        let bob = <Address as TestAddress>::generate(&env);
+        let commitment = BytesN::from_array(&env, &[6u8; 32]);
+
+        env.mock_all_auths();
+        let ip_id = client.commit_ip(&alice, &commitment);
+
+        // Only mock bob's auth — alice's auth is not present, so transfer must panic
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &bob,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "transfer_ip",
+                args: (ip_id, bob.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_ip(&ip_id, &bob);
+    }
+
+    #[test]
+    #[should_panic(expected = "ContractError(1)")]
+    fn test_transfer_ip_nonexistent_panics() {
+        let env = Env::default();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let bob = <Address as TestAddress>::generate(&env);
+        env.mock_all_auths();
+        client.transfer_ip(&999u64, &bob);
     }
 
     #[test]
