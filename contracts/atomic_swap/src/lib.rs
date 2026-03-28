@@ -34,6 +34,8 @@ pub enum DataKey {
     ActiveSwap(u64),
     /// Maps seller address → Vec<u64> of all swap IDs they have initiated.
     SellerSwaps(Address),
+    /// Maps buyer address → Vec<u64> of all swap IDs they are party to.
+    BuyerSwaps(Address),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -190,6 +192,20 @@ impl AtomicSwap {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::SellerSwaps(swap.seller.clone()), 50000, 50000);
+
+        // Append to buyer index
+        let mut buyer_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BuyerSwaps(swap.buyer.clone()))
+            .unwrap_or(Vec::new(&env));
+        buyer_ids.push_back(id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BuyerSwaps(swap.buyer.clone()), &buyer_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::BuyerSwaps(swap.buyer.clone()), 50000, 50000);
 
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
         id
@@ -471,6 +487,13 @@ impl AtomicSwap {
         env.storage()
             .persistent()
             .get(&DataKey::SellerSwaps(seller))
+    }
+
+    /// List all swap IDs where the given address is the buyer. Returns `None` if none exist.
+    pub fn get_swaps_by_buyer(env: Env, buyer: Address) -> Option<Vec<u64>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BuyerSwaps(buyer))
     }
 
     /// Read a swap record. Returns `None` if the swap_id does not exist.
@@ -878,8 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn get_swaps_by_seller_does_not_include_other_sellers_swaps() {
-        let env = Env::default();
+    fn get_swaps_by_seller_does_not_include_other_sellers_swaps() {        let env = Env::default();
         env.mock_all_auths();
 
         let seller_a = Address::generate(&env);
@@ -899,6 +921,69 @@ mod tests {
 
         let a_ids = client.get_swaps_by_seller(&seller_a).unwrap();
         let b_ids = client.get_swaps_by_seller(&seller_b).unwrap();
+
+        assert_eq!(a_ids.len(), 1);
+        assert_eq!(a_ids.get(0).unwrap(), swap_a);
+        assert_eq!(b_ids.len(), 1);
+        assert_eq!(b_ids.get(0).unwrap(), swap_b);
+    }
+
+    #[test]
+    fn get_swaps_by_buyer_returns_none_for_unknown_buyer() {
+        let env = Env::default();
+        let client = AtomicSwapClient::new(&env, &setup_swap(&env));
+        let stranger = Address::generate(&env);
+        assert!(client.get_swaps_by_buyer(&stranger).is_none());
+    }
+
+    #[test]
+    fn get_swaps_by_buyer_tracks_all_swaps_for_buyer() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let admin = Address::generate(&env);
+
+        let registry_id = env.register(IpRegistry, ());
+        let registry = IpRegistryClient::new(&env, &registry_id);
+        let ip_id_0 = registry.commit_ip(&seller, &BytesN::from_array(&env, &[30u8; 32]));
+        let ip_id_1 = registry.commit_ip(&seller, &BytesN::from_array(&env, &[31u8; 32]));
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
+
+        let client = AtomicSwapClient::new(&env, &setup_swap(&env));
+        let swap_id_0 = client.initiate_swap(&registry_id, &token_id, &ip_id_0, &seller, &100_i128, &buyer);
+        let swap_id_1 = client.initiate_swap(&registry_id, &token_id, &ip_id_1, &seller, &200_i128, &buyer);
+
+        let ids = client.get_swaps_by_buyer(&buyer).expect("buyer should have swaps");
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.get(0).unwrap(), swap_id_0);
+        assert_eq!(ids.get(1).unwrap(), swap_id_1);
+    }
+
+    #[test]
+    fn get_swaps_by_buyer_does_not_include_other_buyers_swaps() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = Address::generate(&env);
+        let buyer_a = Address::generate(&env);
+        let buyer_b = Address::generate(&env);
+        let admin = Address::generate(&env);
+
+        let registry_id = env.register(IpRegistry, ());
+        let registry = IpRegistryClient::new(&env, &registry_id);
+        let ip_a = registry.commit_ip(&seller, &BytesN::from_array(&env, &[40u8; 32]));
+        let ip_b = registry.commit_ip(&seller, &BytesN::from_array(&env, &[41u8; 32]));
+        let token_id = setup_token(&env, &admin, &buyer_a, 1000);
+        StellarAssetClient::new(&env, &token_id).mint(&buyer_b, &1000);
+
+        let client = AtomicSwapClient::new(&env, &setup_swap(&env));
+        let swap_a = client.initiate_swap(&registry_id, &token_id, &ip_a, &seller, &100_i128, &buyer_a);
+        let swap_b = client.initiate_swap(&registry_id, &token_id, &ip_b, &seller, &100_i128, &buyer_b);
+
+        let a_ids = client.get_swaps_by_buyer(&buyer_a).unwrap();
+        let b_ids = client.get_swaps_by_buyer(&buyer_b).unwrap();
 
         assert_eq!(a_ids.len(), 1);
         assert_eq!(a_ids.get(0).unwrap(), swap_a);
