@@ -22,6 +22,10 @@ pub enum ContractError {
     IpIsRevoked = 14,
     UnauthorizedUpgrade = 15,
     InvalidFeeBps = 16,
+    DisputeWindowExpired = 17,
+    OnlyBuyerCanDispute = 18,
+    SwapNotDisputed = 19,
+    OnlyAdminCanResolve = 20,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -50,6 +54,7 @@ pub enum SwapStatus {
     Pending,
     Accepted,
     Completed,
+    Disputed,
     Cancelled,
 }
 
@@ -66,6 +71,7 @@ pub struct SwapRecord {
     /// Ledger timestamp after which the buyer may cancel an Accepted swap
     /// if reveal_key has not been called. Set at initiation time.
     pub expiry: u64,
+    pub accept_timestamp: u64,
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -114,10 +120,24 @@ pub struct ProtocolFeeEvent {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeRaisedEvent {
+    pub swap_id: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeResolvedEvent {
+    pub swap_id: u64,
+    pub refunded: bool,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct ProtocolConfig {
     pub protocol_fee_bps: u32,  // 0-10000 (0.00% - 100.00%)
     pub treasury: Address,
+    pub dispute_window_seconds: u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -226,7 +246,9 @@ impl AtomicSwap {
             token,
             status: SwapStatus::Pending,
             expiry: env.ledger().timestamp() + 604800u64,
+            accept_timestamp: 0,
         };
+
 
         env.storage().persistent().set(&DataKey::Swap(id), &swap);
         env.storage()
@@ -353,7 +375,9 @@ impl AtomicSwap {
             &swap.price,
         );
 
+        swap.accept_timestamp = env.ledger().timestamp();
         swap.status = SwapStatus::Accepted;
+
         env.storage()
             .persistent()
             .set(&DataKey::Swap(swap_id), &swap);
@@ -453,6 +477,7 @@ impl AtomicSwap {
             ProtocolConfig {
                 protocol_fee_bps: 0,
                 treasury: env.deployer(),
+                dispute_window_seconds: 86400u64,
             }
         };
         let fee_bps = config.protocol_fee_bps as i128;
