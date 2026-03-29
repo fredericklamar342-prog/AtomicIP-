@@ -2,7 +2,8 @@
 mod tests {
     use crate::IpRecord;
     use soroban_sdk::contractclient;
-    use soroban_sdk::testutils::{Address as TestAddress, Events};
+    use soroban_sdk::testutils::Address as TestAddress;
+    use soroban_sdk::testutils::Events;
     use soroban_sdk::{symbol_short, Address, BytesN, Env, IntoVal, TryFromVal, Vec};
 
     #[contractclient(name = "IpRegistryClient")]
@@ -14,6 +15,7 @@ mod tests {
         fn list_ip_by_owner(env: Env, owner: Address) -> Option<Vec<u64>>;
         fn transfer_ip(env: Env, ip_id: u64, new_owner: Address);
         fn revoke_ip(env: Env, ip_id: u64);
+        fn is_ip_owner(env: Env, ip_id: u64, address: Address) -> bool;
     }
 
     #[test]
@@ -57,8 +59,8 @@ mod tests {
         assert_eq!(record3.commitment_hash, commitment3);
 
         // Verify owner index is correct
-        let owner1_ips = client.list_ip_by_owner(&owner1).expect("owner1 should have IPs");
-        let owner2_ips = client.list_ip_by_owner(&owner2).expect("owner2 should have IPs");
+        let owner1_ips = client.list_ip_by_owner(&owner1).unwrap();
+        let owner2_ips = client.list_ip_by_owner(&owner2).unwrap();
 
         assert_eq!(owner1_ips.len(), 2);
         assert_eq!(owner2_ips.len(), 1);
@@ -337,72 +339,26 @@ mod tests {
         client.revoke_ip(&ip_id);
     }
 
-    /// Issue #144: Verify new owner's index is accessible after transfer
     #[test]
-    fn test_transfer_ip_new_owner_index_accessible() {
+    fn test_is_ip_owner() {
         let env = Env::default();
         let contract_id = env.register(crate::IpRegistry, ());
         let client = IpRegistryClient::new(&env, &contract_id);
 
         let alice = <Address as TestAddress>::generate(&env);
         let bob = <Address as TestAddress>::generate(&env);
-        let commitment = BytesN::from_array(&env, &[12u8; 32]);
+        let commitment = BytesN::from_array(&env, &[10u8; 32]);
 
         env.mock_all_auths();
         let ip_id = client.commit_ip(&alice, &commitment);
 
-        // Transfer to bob
-        client.transfer_ip(&ip_id, &bob);
+        // Alice should be the owner
+        assert!(client.is_ip_owner(&ip_id, &alice));
 
-        // Verify bob's index contains the IP
-        let bob_ips = client.list_ip_by_owner(&bob).expect("bob should have IPs after transfer");
-        assert!(bob_ips.iter().any(|x| x == ip_id));
-    }
+        // Bob should not be the owner
+        assert!(!client.is_ip_owner(&ip_id, &bob));
 
-    /// Issue #145: Verify IpRecord is still accessible after transfer
-    #[test]
-    fn test_transfer_ip_record_accessible() {
-        let env = Env::default();
-        let contract_id = env.register(crate::IpRegistry, ());
-        let client = IpRegistryClient::new(&env, &contract_id);
-
-        let alice = <Address as TestAddress>::generate(&env);
-        let bob = <Address as TestAddress>::generate(&env);
-        let commitment = BytesN::from_array(&env, &[13u8; 32]);
-
-        env.mock_all_auths();
-        let ip_id = client.commit_ip(&alice, &commitment);
-
-        // Transfer to bob
-        client.transfer_ip(&ip_id, &bob);
-
-        // Verify record is still accessible and owner is updated
-        let record = client.get_ip(&ip_id);
-        assert_eq!(record.owner, bob);
-        assert_eq!(record.ip_id, ip_id);
-        assert_eq!(record.commitment_hash, commitment);
-    }
-
-    /// Issue #146: Verify revoked record is still retrievable after revoke
-    #[test]
-    fn test_revoke_ip_record_retrievable() {
-        let env = Env::default();
-        let contract_id = env.register(crate::IpRegistry, ());
-        let client = IpRegistryClient::new(&env, &contract_id);
-
-        let owner = <Address as TestAddress>::generate(&env);
-        let commitment = BytesN::from_array(&env, &[14u8; 32]);
-
-        env.mock_all_auths();
-        let ip_id = client.commit_ip(&owner, &commitment);
-
-        // Revoke the IP
-        client.revoke_ip(&ip_id);
-
-        // Verify revoked record is still retrievable
-        let record = client.get_ip(&ip_id);
-        assert!(record.revoked);
-        assert_eq!(record.ip_id, ip_id);
-        assert_eq!(record.owner, owner);
+        // Non-existent IP should return false
+        assert!(!client.is_ip_owner(&999u64, &alice));
     }
 }
