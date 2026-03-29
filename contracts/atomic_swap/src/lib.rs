@@ -158,7 +158,7 @@ impl AtomicSwap {
             ));
         }
 
-        let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
 
         let swap = SwapRecord {
             ip_id,
@@ -207,7 +207,8 @@ impl AtomicSwap {
             .persistent()
             .extend_ttl(&DataKey::BuyerSwaps(swap.buyer.clone()), 50000, 50000);
 
-        env.storage().instance().set(&DataKey::NextId, &(id + 1));
+        env.storage().persistent().set(&DataKey::NextId, &(id + 1));
+        env.storage().persistent().extend_ttl(&DataKey::NextId, 50000, 50000);
         id
     }
 
@@ -479,6 +480,14 @@ impl AtomicSwap {
             &env.current_contract_address(),
             &swap.buyer,
             &swap.price,
+        );
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("swap_cancel"),),
+            SwapCancelledEvent {
+                swap_id,
+                canceller: caller,
+            },
         );
     }
 
@@ -1039,6 +1048,42 @@ mod tests {
         assert_eq!(a_ids.get(0).unwrap(), swap_a);
         assert_eq!(b_ids.len(), 1);
         assert_eq!(b_ids.get(0).unwrap(), swap_b);
+    }
+
+    /// Verify that cancel_expired_swap emits SwapCancelledEvent.
+    #[test]
+    fn cancel_expired_swap_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (registry_id, ip_id) = setup_registry_with_ip(&env, &seller);
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
+
+        let swap_contract = setup_swap(&env);
+        let client = AtomicSwapClient::new(&env, &swap_contract);
+
+        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
+        client.accept_swap(&swap_id);
+
+        // Advance time past expiry
+        env.ledger().set_timestamp(env.ledger().timestamp() + 604801);
+
+        // Clear events from setup
+        env.events().all();
+
+        // Cancel expired swap
+        client.cancel_expired_swap(&swap_id, &buyer);
+
+        // Verify event was emitted
+        let all_events = env.events().all();
+        assert_eq!(all_events.len(), 1);
+        let event = all_events.get(0).unwrap();
+        let observed_data: SwapCancelledEvent = soroban_sdk::TryFromVal::try_from_val(&env, &event.2).unwrap();
+        assert_eq!(observed_data.swap_id, swap_id);
+        assert_eq!(observed_data.canceller, buyer);
     }
 }
 

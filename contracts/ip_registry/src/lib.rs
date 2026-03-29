@@ -61,8 +61,8 @@ impl IpRegistry {
     ///
     /// # Returns
     ///
-    /// The unique IP ID assigned to this commitment. IDs are monotonically increasing
-    /// and persist across contract upgrades.
+    /// The unique IP ID assigned to this commitment. IDs start at 1 and are monotonically increasing,
+    /// persisting across contract upgrades. ID 0 is reserved and never assigned.
     ///
     /// # Panics
     ///
@@ -111,7 +111,8 @@ impl IpRegistry {
         // NextId lives in persistent storage so it survives contract upgrades.
         // Instance storage is wiped on upgrade, which would reset the counter
         // and cause ID collisions with existing IP records.
-        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
+        // Initialize to 1 so the first IP ID is 1, not 0 (0 is ambiguous with "not found").
+        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(1);
 
         let record = IpRecord {
             ip_id: id,
