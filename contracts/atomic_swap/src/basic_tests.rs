@@ -387,35 +387,31 @@ mod tests {
         client.initiate_swap(&registry_id, &token_id, &9999u64, &seller, &500_i128, &buyer);
     }
 
-    /// Issue #52: initiate_swap must emit a SwapInitiatedEvent.
+    /// Issue #53: reveal_key must emit a KeyRevealedEvent.
     #[test]
-    fn test_initiate_swap_emits_event() {
+    fn test_reveal_key_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
 
         let seller = soroban_sdk::Address::generate(&env);
         let buyer = soroban_sdk::Address::generate(&env);
 
-        let (registry_id, ip_id, _, _) = setup_registry(&env, &seller);
+        let (registry_id, ip_id, secret, blinding_factor) = setup_registry(&env, &seller);
         let contract_id = env.register(AtomicSwap, ());
         let client = AtomicSwapClient::new(&env, &contract_id);
 
         let swap_id = client.initiate_swap(&registry_id, &ip_id, &seller, &500_i128, &buyer);
+        client.accept_swap(&swap_id);
+        client.reveal_key(&swap_id, &seller, &secret, &blinding_factor);
 
         let all_events = env.events().all();
-        // The last event must be the swap_init event (ip_registry may emit its own events first).
         let event = all_events.last().unwrap();
 
-        let expected_topics =
-            (soroban_sdk::symbol_short!("swap_init"),).into_val(&env);
+        let expected_topics = (soroban_sdk::symbol_short!("key_rev"),).into_val(&env);
         assert_eq!(event.1, expected_topics);
 
-        let observed: SwapInitiatedEvent =
-            soroban_sdk::FromVal::from_val(&env, &event.2);
+        let observed: KeyRevealedEvent = soroban_sdk::FromVal::from_val(&env, &event.2);
         assert_eq!(observed.swap_id, swap_id);
-        assert_eq!(observed.ip_id, ip_id);
-        assert_eq!(observed.seller, seller);
-        assert_eq!(observed.buyer, buyer);
-        assert_eq!(observed.price, 500_i128);
+        assert_eq!(observed.decryption_key, secret);
     }
 }
