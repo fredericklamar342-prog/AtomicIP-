@@ -1,6 +1,6 @@
 #![no_std]
 use ip_registry::IpRegistryClient;
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Error, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Bytes, Env, Error, Vec};
 
 // ── Error Codes ────────────────────────────────────────────────────────────
 
@@ -20,6 +20,7 @@ pub enum ContractError {
     OnlyTheBuyerCanCancelAnExpiredSwap = 12,
     SwapHasNotExpiredYet = 13,
     IpIsRevoked = 14,
+    UnauthorizedUpgrade = 15,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ pub enum DataKey {
     SellerSwaps(Address),
     /// Maps buyer address → Vec<u64> of all swap IDs they are party to.
     BuyerSwaps(Address),
+    Admin,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -127,6 +129,13 @@ impl AtomicSwap {
         buyer: Address,
     ) -> u64 {
         seller.require_auth();
+
+        // Initialize admin on first call if not set
+        if !env.storage().persistent().has(&DataKey::Admin) {
+            let admin = env.deployer();
+            env.storage().persistent().set(&DataKey::Admin, &admin);
+            env.storage().persistent().extend_ttl(&DataKey::Admin, 50000, 50000);
+        }
 
         // 2. Guard: price must be positive.
         if price <= 0 {
@@ -482,8 +491,7 @@ impl AtomicSwap {
         );
     }
 
-    /// List all swap IDs initiated by a seller. Returns `None` if the seller has no swaps.
-    pub fn get_swaps_by_seller(env: Env, seller: Address) -> Option<Vec<u64>> {
+    /// Admin-only contract upgrade.\n    ///\n    /// # Panics\n    ///\n    /// Panics if caller is not admin or admin not initialized.\n    pub fn upgrade(env: Env, new_wasm_hash: Bytes) {\n        let admin_opt = env.storage().persistent().get(&DataKey::Admin);\n        if admin_opt.is_none() {\n            env.panic_with_error(Error::from_contract_error(ContractError::UnauthorizedUpgrade as u32));\n        }\n        let admin = admin_opt.unwrap();\n        let invoker = env.invoker();\n        if invoker != admin {\n            env.panic_with_error(Error::from_contract_error(ContractError::UnauthorizedUpgrade as u32));\n        }\n        admin.require_auth();\n        env.deployer().update_current_contract_wasm(new_wasm_hash);\n    }\n\n    /// List all swap IDs initiated by a seller. Returns `None` if the seller has no swaps.\n    pub fn get_swaps_by_seller(env: Env, seller: Address) -> Option<Vec<u64>> {
         env.storage()
             .persistent()
             .get(&DataKey::SellerSwaps(seller))
