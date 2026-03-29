@@ -267,6 +267,9 @@ impl IpRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::IpRecord(ip_id), &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::IpRecord(ip_id), 50000, 50000);
     }
 
     /// Retrieve an IP record by ID.
