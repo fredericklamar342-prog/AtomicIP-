@@ -10,6 +10,7 @@ mod tests {
     pub trait IpRegistry {
         fn commit_ip(env: Env, owner: Address, commitment_hash: BytesN<32>) -> u64;
         fn get_ip(env: Env, ip_id: u64) -> IpRecord;
+        fn verify_commitment(env: Env, ip_id: u64, secret: BytesN<32>, blinding_factor: BytesN<32>) -> bool;
         fn list_ip_by_owner(env: Env, owner: Address) -> Option<Vec<u64>>;
         fn transfer_ip(env: Env, ip_id: u64, new_owner: Address);
         fn revoke_ip(env: Env, ip_id: u64);
@@ -244,6 +245,71 @@ mod tests {
         let ip_id = client.commit_ip(&owner, &BytesN::from_array(&env, &[8u8; 32]));
         client.revoke_ip(&ip_id);
         client.revoke_ip(&ip_id); // must panic with IpAlreadyRevoked (code 4)
+    }
+
+    /// Issue: Verify commit_ip assigns IDs sequentially (0, 1, 2).
+    #[test]
+    fn test_sequential_ip_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        let id0 = client.commit_ip(&owner, &BytesN::from_array(&env, &[1u8; 32]));
+        let id1 = client.commit_ip(&owner, &BytesN::from_array(&env, &[2u8; 32]));
+        let id2 = client.commit_ip(&owner, &BytesN::from_array(&env, &[3u8; 32]));
+
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+    }
+
+    /// Issue: verify_commitment returns false for a wrong secret.
+    #[test]
+    fn test_wrong_secret_returns_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        let secret = BytesN::from_array(&env, &[10u8; 32]);
+        let blinding = BytesN::from_array(&env, &[20u8; 32]);
+
+        // Build commitment_hash = sha256(secret || blinding)
+        let mut preimage = soroban_sdk::Bytes::new(&env);
+        preimage.append(&soroban_sdk::Bytes::from(secret.clone()));
+        preimage.append(&soroban_sdk::Bytes::from(blinding.clone()));
+        let commitment_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+        let ip_id = client.commit_ip(&owner, &commitment_hash);
+
+        // Wrong secret — must return false
+        let wrong_secret = BytesN::from_array(&env, &[99u8; 32]);
+        assert!(!client.verify_commitment(&ip_id, &wrong_secret, &blinding));
+        // Correct secret — must return true
+        assert!(client.verify_commitment(&ip_id, &secret, &blinding));
+    }
+
+    /// Issue: list_ip_by_owner returns all IDs committed by an owner in order.
+    #[test]
+    fn test_list_ip_by_owner_returns_all_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::IpRegistry, ());
+        let client = IpRegistryClient::new(&env, &contract_id);
+
+        let owner = <Address as TestAddress>::generate(&env);
+        let id0 = client.commit_ip(&owner, &BytesN::from_array(&env, &[4u8; 32]));
+        let id1 = client.commit_ip(&owner, &BytesN::from_array(&env, &[5u8; 32]));
+        let id2 = client.commit_ip(&owner, &BytesN::from_array(&env, &[6u8; 32]));
+
+        let ids = client.list_ip_by_owner(&owner).expect("owner should have IPs");
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.get(0).unwrap(), id0);
+        assert_eq!(ids.get(1).unwrap(), id1);
+        assert_eq!(ids.get(2).unwrap(), id2);
     }
 
     #[test]

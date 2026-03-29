@@ -829,6 +829,56 @@ mod tests {
         );
     }
 
+    /// End-to-end: commit_ip → initiate_swap → accept_swap → reveal_key.
+    /// Asserts seller receives payment and buyer can verify commitment with revealed key.
+    #[test]
+    fn test_e2e_commit_swap_reveal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let admin = Address::generate(&env);
+
+        // 1. Commit IP with a known secret + blinding_factor
+        let secret = BytesN::from_array(&env, &[7u8; 32]);
+        let blinding_factor = BytesN::from_array(&env, &[8u8; 32]);
+        let mut preimage = soroban_sdk::Bytes::new(&env);
+        preimage.append(&soroban_sdk::Bytes::from(secret.clone()));
+        preimage.append(&soroban_sdk::Bytes::from(blinding_factor.clone()));
+        let commitment_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+        let registry_id = env.register(IpRegistry, ());
+        let registry = IpRegistryClient::new(&env, &registry_id);
+        let ip_id = registry.commit_ip(&seller, &commitment_hash);
+
+        // 2. Set up token and swap contract
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
+        let swap_contract = setup_swap(&env);
+        let client = AtomicSwapClient::new(&env, &swap_contract);
+        let token_client = token::Client::new(&env, &token_id);
+
+        // 3. Initiate swap
+        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &1000_i128, &buyer);
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Pending);
+
+        // 4. Accept swap — payment moves to escrow
+        client.accept_swap(&swap_id);
+        assert_eq!(token_client.balance(&buyer), 0);
+        assert_eq!(token_client.balance(&swap_contract), 1000);
+
+        // 5. Reveal key — payment releases to seller
+        let seller_balance_before = token_client.balance(&seller);
+        client.reveal_key(&swap_id, &seller, &secret, &blinding_factor);
+
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Completed);
+        assert_eq!(token_client.balance(&swap_contract), 0);
+        assert_eq!(token_client.balance(&seller), seller_balance_before + 1000);
+
+        // 6. Buyer verifies commitment with the revealed key
+        assert!(registry.verify_commitment(&ip_id, &secret, &blinding_factor));
+    }
+
     /// Payment is transferred from buyer to contract escrow on accept_swap,
     /// and released to seller on reveal_key.
     #[test]
