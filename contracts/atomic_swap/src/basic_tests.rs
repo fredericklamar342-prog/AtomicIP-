@@ -3,7 +3,7 @@ mod tests {
     use ip_registry::{IpRegistry, IpRegistryClient};
     use soroban_sdk::{testutils::{Address as _, Ledger}, Address, BytesN, Env};
 
-    use crate::{AtomicSwap, AtomicSwapClient, DataKey, SwapStatus};
+    use crate::{AtomicSwap, AtomicSwapClient, DataKey, SwapCancelledEvent, SwapStatus};
 
     /// Helper: register IpRegistry, commit an IP with a known secret+blinding_factor.
     /// Returns (registry_id, ip_id, secret, blinding_factor).
@@ -285,5 +285,32 @@ mod tests {
 
         let swap_id = client.initiate_swap(&registry_id, &ip_id, &seller, &500_i128, &buyer);
         client.cancel_expired_swap(&swap_id, &buyer);
+    }
+
+    /// Issue #54: cancel_swap must emit a SwapCancelledEvent.
+    #[test]
+    fn test_cancel_swap_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let seller = soroban_sdk::Address::generate(&env);
+        let buyer = soroban_sdk::Address::generate(&env);
+
+        let (registry_id, ip_id, _, _) = setup_registry(&env, &seller);
+        let contract_id = env.register(AtomicSwap, ());
+        let client = AtomicSwapClient::new(&env, &contract_id);
+
+        let swap_id = client.initiate_swap(&registry_id, &ip_id, &seller, &500_i128, &buyer);
+        client.cancel_swap(&swap_id, &seller);
+
+        let all_events = env.events().all();
+        let event = all_events.last().unwrap();
+
+        let expected_topics = (soroban_sdk::symbol_short!("swap_cncl"),).into_val(&env);
+        assert_eq!(event.1, expected_topics);
+
+        let observed: SwapCancelledEvent = soroban_sdk::FromVal::from_val(&env, &event.2);
+        assert_eq!(observed.swap_id, swap_id);
+        assert_eq!(observed.canceller, seller);
     }
 }
