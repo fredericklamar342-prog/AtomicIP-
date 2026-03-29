@@ -83,21 +83,21 @@ mod tests {
         // Call commit_ip which should emit an event
         let ip_id = client.commit_ip(&owner, &commitment);
 
-        // Verify the event payload and topic.
-        let record = client.get_ip(&ip_id);
-
+        // Check events immediately after commit_ip, before any other calls.
         let all_events = env.events().all();
         assert_eq!(all_events.len(), 1);
         let event = all_events.get(0).unwrap();
         let expected_topics = (symbol_short!("ip_commit"), owner.clone()).into_val(&env);
-        let expected_data = (ip_id, record.timestamp);
         assert_eq!(event.1, expected_topics);
         let observed_data: (u64, u64) = TryFromVal::try_from_val(&env, &event.2).unwrap();
-        assert_eq!(observed_data, expected_data);
+        assert_eq!(observed_data.0, ip_id);
 
+        // Verify the record separately.
+        let record = client.get_ip(&ip_id);
         assert_eq!(record.owner, owner);
         assert_eq!(record.commitment_hash, commitment);
         assert_eq!(record.ip_id, ip_id);
+        assert_eq!(observed_data.1, record.timestamp);
     }
 
     #[test]
