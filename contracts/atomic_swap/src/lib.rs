@@ -549,7 +549,7 @@ mod tests {
     }
 
     /// Deploys a Stellar asset contract and mints `amount` tokens to `recipient`.
-    fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
+    pub(crate) fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
         let token_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
         StellarAssetClient::new(env, &token_id).mint(recipient, &amount);
         token_id
@@ -641,7 +641,12 @@ mod tests {
         let client = AtomicSwapClient::new(&env, &setup_swap(&env));
         let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
         client.accept_swap(&swap_id);
-        client.reveal_key(&swap_id, &seller, &BytesN::from_array(&env, &[0u8; 32]));
+        client.reveal_key(
+            &swap_id,
+            &seller,
+            &BytesN::from_array(&env, &[0u8; 32]),
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
 
         let new_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &150_i128, &buyer);
         assert_ne!(new_id, swap_id);
@@ -667,10 +672,12 @@ mod tests {
         let ip_id_2 = registry.commit_ip(&seller, &BytesN::from_array(&env, &[3u8; 32]));
 
         let client = AtomicSwapClient::new(&env, &setup_swap(&env));
+        let admin = Address::generate(&env);
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
 
-        let id0 = client.initiate_swap(&registry_id, &ip_id_0, &seller, &100_i128, &buyer);
-        let id1 = client.initiate_swap(&registry_id, &ip_id_1, &seller, &100_i128, &buyer);
-        let id2 = client.initiate_swap(&registry_id, &ip_id_2, &seller, &100_i128, &buyer);
+        let id0 = client.initiate_swap(&registry_id, &token_id, &ip_id_0, &seller, &100_i128, &buyer);
+        let id1 = client.initiate_swap(&registry_id, &token_id, &ip_id_1, &seller, &100_i128, &buyer);
+        let id2 = client.initiate_swap(&registry_id, &token_id, &ip_id_2, &seller, &100_i128, &buyer);
 
         // IDs must be strictly increasing — no resets, no collisions.
         assert_eq!(id0, 0);
@@ -718,12 +725,13 @@ mod tests {
 
         // Register a registry but do NOT commit any IP — ip_id 9999 does not exist.
         let registry_id = env.register(IpRegistry, ());
+        let token_id = setup_token(&env, &seller, &buyer, 1000);
 
         let client = AtomicSwapClient::new(&env, &setup_swap(&env));
 
         assert!(
             client
-                .try_initiate_swap(&registry_id, &9999_u64, &seller, &100_i128, &buyer)
+                .try_initiate_swap(&registry_id, &token_id, &9999_u64, &seller, &100_i128, &buyer)
                 .is_err(),
             "expected initiate_swap to fail for non-existent ip_id"
         );
@@ -829,6 +837,70 @@ mod tests {
         );
     }
 
+    /// Issue #72: accept_swap by non-buyer should panic/auth-fail.
+    #[test]
+    fn non_buyer_cannot_accept_swap_with_wrong_auth() {
+        let env = Env::default();
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let non_buyer = Address::generate(&env);
+        let admin = Address::generate(&env);
+
+        // Set up registry and IP with seller auth mocked for setup calls.
+        let registry_id = env.register(IpRegistry, ());
+        let registry = IpRegistryClient::new(&env, &registry_id);
+        let commitment = BytesN::from_array(&env, &[2u8; 32]);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &seller,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &registry_id,
+                fn_name: "commit_ip",
+                args: soroban_sdk::IntoVal::into_val(&(&seller, &commitment), &env),
+                sub_invokes: &[],
+            },
+        }]);
+        let ip_id = registry.commit_ip(&seller, &commitment);
+
+        // Deploy token and mint to buyer (all_auths for mint only).
+        env.mock_all_auths();
+        let token_id = setup_token(&env, &admin, &buyer, 1000);
+
+        let swap_contract = env.register(AtomicSwap, ());
+        let client = AtomicSwapClient::new(&env, &swap_contract);
+
+        // Initiate swap with seller auth.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &seller,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &swap_contract,
+                fn_name: "initiate_swap",
+                args: soroban_sdk::IntoVal::into_val(
+                    &(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer),
+                    &env,
+                ),
+                sub_invokes: &[],
+            },
+        }]);
+        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
+
+        // Attempt accept_swap from non-buyer.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &non_buyer,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &swap_contract,
+                fn_name: "accept_swap",
+                args: soroban_sdk::IntoVal::into_val(&(&swap_id,), &env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(
+            client.try_accept_swap(&swap_id).is_err(),
+            "expected accept_swap to fail when a non-buyer caller tries"
+        );
+    }
+
     /// Payment is transferred from buyer to contract escrow on accept_swap,
     /// and released to seller on reveal_key.
     #[test]
@@ -859,7 +931,12 @@ mod tests {
         assert_eq!(token_client.balance(&swap_contract), 500);
 
         let seller_balance_before = token_client.balance(&seller);
-        client.reveal_key(&swap_id, &BytesN::from_array(&env, &[0u8; 32]));
+        client.reveal_key(
+            &swap_id,
+            &seller,
+            &BytesN::from_array(&env, &[0u8; 32]),
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
 
         // After reveal: escrow released to seller.
         assert_eq!(token_client.balance(&swap_contract), 0);
