@@ -61,8 +61,8 @@ impl IpRegistry {
     ///
     /// # Returns
     ///
-    /// The unique IP ID assigned to this commitment. IDs are monotonically increasing
-    /// and persist across contract upgrades.
+    /// The unique IP ID assigned to this commitment. IDs start at 1 and are monotonically increasing,
+    /// persisting across contract upgrades. ID 0 is reserved and never assigned.
     ///
     /// # Panics
     ///
@@ -111,7 +111,8 @@ impl IpRegistry {
         // NextId lives in persistent storage so it survives contract upgrades.
         // Instance storage is wiped on upgrade, which would reset the counter
         // and cause ID collisions with existing IP records.
-        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
+        // Initialize to 1 so the first IP ID is 1, not 0 (0 is ambiguous with "not found").
+        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(1);
 
         let record = IpRecord {
             ip_id: id,
@@ -141,6 +142,14 @@ impl IpRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::OwnerIps(owner.clone()), 50000, 50000);
+
+        // Track commitment hash ownership and extend TTL
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommitmentOwner(commitment_hash.clone()), &owner);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::CommitmentOwner(commitment_hash.clone()), 50000, 50000);
 
         env.storage().persistent().set(&DataKey::NextId, &(id + 1));
         env.storage().persistent().extend_ttl(&DataKey::NextId, 50000, 50000);
@@ -197,7 +206,10 @@ impl IpRegistry {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::OwnerIps(old_owner), &old_ids);
+            .set(&DataKey::OwnerIps(old_owner.clone()), &old_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::OwnerIps(old_owner), 50000, 50000);
 
         // Add to new owner's index
         let mut new_ids: Vec<u64> = env
@@ -209,6 +221,9 @@ impl IpRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::OwnerIps(new_owner.clone()), &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::OwnerIps(new_owner.clone()), 50000, 50000);
 
         // Update commitment index
         env.storage().persistent().set(
@@ -220,6 +235,9 @@ impl IpRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::IpRecord(ip_id), &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::IpRecord(ip_id), 50000, 50000);
     }
 
     /// Revoke an IP record, marking it as invalid.
@@ -250,6 +268,9 @@ impl IpRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::IpRecord(ip_id), &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::IpRecord(ip_id), 50000, 50000);
     }
 
     /// Retrieve an IP record by ID.
