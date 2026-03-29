@@ -20,6 +20,8 @@ pub enum ContractError {
     OnlyTheBuyerCanCancelAnExpiredSwap = 12,
     SwapHasNotExpiredYet = 13,
     IpIsRevoked = 14,
+    ContractPaused = 15,
+    Unauthorized = 16,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -36,6 +38,12 @@ pub enum DataKey {
     SellerSwaps(Address),
     /// Maps buyer address → Vec<u64> of all swap IDs they are party to.
     BuyerSwaps(Address),
+    /// Maps ip_id → Vec<u64> of all swap IDs ever created for that IP.
+    IpSwaps(u64),
+    /// Admin address — set on first pause/unpause call if not yet initialised.
+    Admin,
+    /// Whether the contract is paused.
+    Paused,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -144,6 +152,18 @@ impl AtomicSwap {
         price: i128,
         buyer: Address,
     ) -> u64 {
+        // Guard: reject new swaps when the contract is paused.
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::ContractPaused as u32,
+            ));
+        }
+
         seller.require_auth();
 
         // 2. Guard: price must be positive.
@@ -176,7 +196,7 @@ impl AtomicSwap {
             ));
         }
 
-        let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+        let id: u64 = env.storage().persistent().get(&DataKey::NextId).unwrap_or(0);
 
         let swap = SwapRecord {
             ip_id,
@@ -225,6 +245,20 @@ impl AtomicSwap {
             .persistent()
             .extend_ttl(&DataKey::BuyerSwaps(swap.buyer.clone()), 50000, 50000);
 
+        // Append to ip-swaps index
+        let mut ip_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IpSwaps(ip_id))
+            .unwrap_or(Vec::new(&env));
+        ip_ids.push_back(id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::IpSwaps(ip_id), &ip_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::IpSwaps(ip_id), 50000, 50000);
+
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
 
         env.events().publish(
@@ -262,6 +296,18 @@ impl AtomicSwap {
     /// * The buyer does not authorize the transaction (auth error)
     /// * The swap is not in Pending status (swap_not_pending error)
     pub fn accept_swap(env: Env, swap_id: u64) {
+        // Guard: reject new acceptances when the contract is paused.
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::ContractPaused as u32,
+            ));
+        }
+
         let mut swap: SwapRecord = env
             .storage()
             .persistent()
@@ -515,6 +561,14 @@ impl AtomicSwap {
             &swap.buyer,
             &swap.price,
         );
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("swap_cancel"),),
+            SwapCancelledEvent {
+                swap_id,
+                canceller: caller,
+            },
+        );
     }
 
     /// List all swap IDs initiated by a seller. Returns `None` if the seller has no swaps.
@@ -529,6 +583,70 @@ impl AtomicSwap {
         env.storage()
             .persistent()
             .get(&DataKey::BuyerSwaps(buyer))
+    }
+
+    /// List all swap IDs ever created for a given IP. Returns `None` if none exist.
+    pub fn get_swaps_by_ip(env: Env, ip_id: u64) -> Option<Vec<u64>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IpSwaps(ip_id))
+    }
+
+    /// Set the admin address. Can only be called once (bootstraps the admin).
+    /// After the admin is set, only the current admin can call pause/unpause.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            // Only the existing admin may rotate the admin key.
+            let current: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if current != new_admin {
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::Unauthorized as u32,
+                ));
+            }
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+    }
+
+    /// Pause the contract. Only the admin may call this.
+    /// Blocks initiate_swap and accept_swap; cancel_swap and reveal_key remain available.
+    pub fn pause(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::Unauthorized as u32,
+                ))
+            });
+        if caller != admin {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::Unauthorized as u32,
+            ));
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+    }
+
+    /// Unpause the contract. Only the admin may call this.
+    pub fn unpause(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| {
+                env.panic_with_error(Error::from_contract_error(
+                    ContractError::Unauthorized as u32,
+                ))
+            });
+        if caller != admin {
+            env.panic_with_error(Error::from_contract_error(
+                ContractError::Unauthorized as u32,
+            ));
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
     }
 
     /// Read a swap record. Returns `None` if the swap_id does not exist.
