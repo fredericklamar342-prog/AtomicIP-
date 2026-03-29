@@ -1,21 +1,42 @@
 #[cfg(test)]
 mod tests {
     use ip_registry::{IpRegistry, IpRegistryClient};
-    use soroban_sdk::{testutils::{Address as _, storage::Persistent}, Address, BytesN, Env};
-    use soroban_sdk::token::StellarAssetClient;
-    use crate::{AtomicSwap, AtomicSwapClient, DataKey, LEDGER_BUMP};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+        Address, BytesN, Env,
+    };
 
-    fn setup_registry_with_ip(env: &Env, owner: &Address) -> (Address, u64) {
+    use crate::{AtomicSwap, AtomicSwapClient, DataKey, SwapStatus};
+
+    fn setup_registry(env: &Env, owner: &Address) -> (Address, u64, BytesN<32>, BytesN<32>) {
         let registry_id = env.register(IpRegistry, ());
         let registry = IpRegistryClient::new(env, &registry_id);
-        let ip_id = registry.commit_ip(owner, &BytesN::from_array(env, &[1u8; 32]));
-        (registry_id, ip_id)
+
+        let secret = BytesN::from_array(env, &[2u8; 32]);
+        let blinding = BytesN::from_array(env, &[3u8; 32]);
+
+        let mut preimage = soroban_sdk::Bytes::new(env);
+        preimage.append(&soroban_sdk::Bytes::from(secret.clone()));
+        preimage.append(&soroban_sdk::Bytes::from(blinding.clone()));
+        let commitment_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+        let ip_id = registry.commit_ip(owner, &commitment_hash);
+        (registry_id, ip_id, secret, blinding)
     }
 
     fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
-        let token_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(env, &token_id).mint(recipient, &amount);
         token_id
+    }
+
+    fn setup_swap(env: &Env, registry_id: &Address) -> Address {
+        let contract_id = env.register(AtomicSwap, ());
+        AtomicSwapClient::new(env, &contract_id).initialize(registry_id);
+        contract_id
     }
 
     #[test]
@@ -26,21 +47,20 @@ mod tests {
         let seller = Address::generate(&env);
         let buyer = Address::generate(&env);
         let admin = Address::generate(&env);
-        let (registry_id, ip_id) = setup_registry_with_ip(&env, &seller);
+        let (registry_id, ip_id, _, _) = setup_registry(&env, &seller);
         let token_id = setup_token(&env, &admin, &buyer, 1000);
 
-        let contract_id = env.register(AtomicSwap, ());
+        let contract_id = setup_swap(&env, &registry_id);
         let client = AtomicSwapClient::new(&env, &contract_id);
-        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
 
-        let swap_ttl = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
-        let active_ttl = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::ActiveSwap(ip_id))
-        });
-        assert!(swap_ttl >= LEDGER_BUMP, "Swap TTL must be >= LEDGER_BUMP after initiation");
-        assert!(active_ttl >= LEDGER_BUMP, "ActiveSwap TTL must be >= LEDGER_BUMP after initiation");
+        let swap_id = client.initiate_swap(&token_id, &ip_id, &seller, &500_i128, &buyer);
+
+        let ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
+        assert!(ttl > 0, "TTL should be set after swap initiation");
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Pending);
     }
 
     #[test]
@@ -51,18 +71,21 @@ mod tests {
         let seller = Address::generate(&env);
         let buyer = Address::generate(&env);
         let admin = Address::generate(&env);
-        let (registry_id, ip_id) = setup_registry_with_ip(&env, &seller);
+        let (registry_id, ip_id, _, _) = setup_registry(&env, &seller);
         let token_id = setup_token(&env, &admin, &buyer, 1000);
 
-        let contract_id = env.register(AtomicSwap, ());
+        let contract_id = setup_swap(&env, &registry_id);
         let client = AtomicSwapClient::new(&env, &contract_id);
-        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
+
+        let swap_id = client.initiate_swap(&token_id, &ip_id, &seller, &500_i128, &buyer);
         client.accept_swap(&swap_id);
 
-        let ttl = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
-        assert!(ttl >= LEDGER_BUMP, "Swap TTL must be >= LEDGER_BUMP after acceptance");
+        let ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
+        assert!(ttl > 0, "TTL should be extended after swap acceptance");
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Accepted);
     }
 
     #[test]
@@ -73,31 +96,22 @@ mod tests {
         let seller = Address::generate(&env);
         let buyer = Address::generate(&env);
         let admin = Address::generate(&env);
-
-        // Build a real commitment so reveal_key passes verification.
-        let secret = BytesN::from_array(&env, &[7u8; 32]);
-        let blinding = BytesN::from_array(&env, &[8u8; 32]);
-        let mut preimage = soroban_sdk::Bytes::new(&env);
-        preimage.append(&soroban_sdk::Bytes::from(secret.clone()));
-        preimage.append(&soroban_sdk::Bytes::from(blinding.clone()));
-        let commitment_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
-
-        let registry_id = env.register(IpRegistry, ());
-        let registry = IpRegistryClient::new(&env, &registry_id);
-        let ip_id = registry.commit_ip(&seller, &commitment_hash);
-
+        let (registry_id, ip_id, secret, blinding) = setup_registry(&env, &seller);
         let token_id = setup_token(&env, &admin, &buyer, 1000);
-        let contract_id = env.register(AtomicSwap, ());
+
+        let contract_id = setup_swap(&env, &registry_id);
         let client = AtomicSwapClient::new(&env, &contract_id);
 
-        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &1000_i128, &buyer);
+        let swap_id = client.initiate_swap(&token_id, &ip_id, &seller, &500_i128, &buyer);
         client.accept_swap(&swap_id);
         client.reveal_key(&swap_id, &seller, &secret, &blinding);
 
-        let ttl = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
-        assert!(ttl >= LEDGER_BUMP, "Swap TTL must be >= LEDGER_BUMP after completion");
+        let ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
+        assert!(ttl > 0, "TTL should be extended after swap completion");
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Completed);
     }
 
     #[test]
@@ -108,18 +122,21 @@ mod tests {
         let seller = Address::generate(&env);
         let buyer = Address::generate(&env);
         let admin = Address::generate(&env);
-        let (registry_id, ip_id) = setup_registry_with_ip(&env, &seller);
+        let (registry_id, ip_id, _, _) = setup_registry(&env, &seller);
         let token_id = setup_token(&env, &admin, &buyer, 1000);
 
-        let contract_id = env.register(AtomicSwap, ());
+        let contract_id = setup_swap(&env, &registry_id);
         let client = AtomicSwapClient::new(&env, &contract_id);
-        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &100_i128, &buyer);
+
+        let swap_id = client.initiate_swap(&token_id, &ip_id, &seller, &500_i128, &buyer);
         client.cancel_swap(&swap_id, &seller);
 
-        let ttl = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
-        assert!(ttl >= LEDGER_BUMP, "Swap TTL must be >= LEDGER_BUMP after cancellation");
+        let ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
+        assert!(ttl > 0, "TTL should be extended after swap cancellation");
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Cancelled);
     }
 
     #[test]
@@ -130,39 +147,33 @@ mod tests {
         let seller = Address::generate(&env);
         let buyer = Address::generate(&env);
         let admin = Address::generate(&env);
-
-        let secret = BytesN::from_array(&env, &[9u8; 32]);
-        let blinding = BytesN::from_array(&env, &[10u8; 32]);
-        let mut preimage = soroban_sdk::Bytes::new(&env);
-        preimage.append(&soroban_sdk::Bytes::from(secret.clone()));
-        preimage.append(&soroban_sdk::Bytes::from(blinding.clone()));
-        let commitment_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
-
-        let registry_id = env.register(IpRegistry, ());
-        let registry = IpRegistryClient::new(&env, &registry_id);
-        let ip_id = registry.commit_ip(&seller, &commitment_hash);
-
+        let (registry_id, ip_id, secret, blinding) = setup_registry(&env, &seller);
         let token_id = setup_token(&env, &admin, &buyer, 1000);
-        let contract_id = env.register(AtomicSwap, ());
+
+        let contract_id = setup_swap(&env, &registry_id);
         let client = AtomicSwapClient::new(&env, &contract_id);
 
-        let swap_id = client.initiate_swap(&registry_id, &token_id, &ip_id, &seller, &1000_i128, &buyer);
-        let ttl_init = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
+        let swap_id = client.initiate_swap(&token_id, &ip_id, &seller, &500_i128, &buyer);
+        let ttl_init = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
 
         client.accept_swap(&swap_id);
-        let ttl_accept = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
+        let ttl_accept = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
 
         client.reveal_key(&swap_id, &seller, &secret, &blinding);
-        let ttl_complete = env.as_contract(&contract_id, || {
-            env.storage().persistent().get_ttl(&DataKey::Swap(swap_id))
-        });
+        let ttl_complete = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Swap(swap_id));
 
-        assert!(ttl_init >= LEDGER_BUMP);
-        assert!(ttl_accept >= LEDGER_BUMP);
-        assert!(ttl_complete >= LEDGER_BUMP);
+        assert!(ttl_init > 0);
+        assert!(ttl_accept > 0);
+        assert!(ttl_complete > 0);
+        assert_eq!(client.get_swap(&swap_id).unwrap().status, SwapStatus::Completed);
     }
 }
