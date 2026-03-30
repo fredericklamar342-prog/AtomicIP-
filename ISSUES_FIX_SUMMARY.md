@@ -4,6 +4,7 @@ This document summarizes the fixes for 4 GitHub issues in the AtomicIP smart con
 
 ## Issue #32: Fix reveal_key does not verify decryption key against IP commitment
 
+**Fixes #32**
 **Status:** ✅ ALREADY FIXED  
 **Location:** `contracts/atomic_swap/src/lib.rs` lines 188-192  
 **Fix:** The `reveal_key` function now calls `ip_registry.verify_commitment()` to verify that the revealed secret and blinding factor match the stored commitment hash before marking the swap as Completed.
@@ -24,6 +25,7 @@ if !valid {
 
 ## Issue #34: Fix reveal_key does not release escrowed payment to seller
 
+**Fixes #34**
 **Status:** ✅ FIXED  
 **Location:** `contracts/atomic_swap/src/lib.rs` lines 202-207  
 **Fix:** Added token transfer to release escrowed payment to seller after successful key verification.
@@ -47,6 +49,7 @@ token::Client::new(&env, &swap.token).transfer(
 
 ## Issue #35: Fix cancel_swap does not refund buyer's escrowed payment
 
+**Fixes #35**
 **Status:** ✅ FIXED  
 **Location:** `contracts/atomic_swap/src/lib.rs` lines 286-291  
 **Fix:** Added token transfer to refund buyer when an Accepted swap is cancelled after expiry.
@@ -107,6 +110,7 @@ fn test_buyer_refunded_on_cancel_expired() {
 
 ## Issue #44: Fix commit_ip does not check for duplicate commitment hashes
 
+**Fixes #44**
 **Status:** ✅ ALREADY FIXED  
 **Location:** `contracts/ip_registry/src/lib.rs` lines 75-81  
 **Fix:** Added duplicate commitment hash check using the `CommitmentOwner` storage key.
